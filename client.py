@@ -45,22 +45,31 @@ class NetworkHandler(ss.StreamRequestHandler):  # Defines a network request hand
 
 
 class Unit:  # Class to represent individual units
-    def __init__(self, config: dict) -> None:  # Constructor initializes unit properties
+    def __init__(self, config: dict, x, y) -> None:  # Constructor initializes unit properties
         self.id = config['id']  # Unit ID
-        self.x = config['x']  # Unit x-coordinate
-        self.y = config['y']  # Unit y-coordinate
+        self.x = x  # Unit x-coordinate
+        self.y = y  # Unit y-coordinate
         self.type = config['type']  # Type of the unit
         self.status = config['status']  # Status of the unit
         self.hp = config['health']  # Health points of the unit
         self.resource = config.get("resource", None)  # Optional resource attribute
         self.attack = config.get("can_attack", None)  # Optional attack capability
 
+    def update(self, config: dict):
+        self.x += config['x']
+        self.y += config['y']
+        self.type = config['type']
+        self.status = config['status']
+        self.hp = config['health']
+        self.resource = config.get("resource", None)
+        self.attack = config.get("can_attack", None)
+
 
 class Tile:  # Class to represent tiles in the game map
-    def __init__(self, config: dict) -> None:  # Constructor initializes tile properties
+    def __init__(self, config: dict, x, y) -> None:  # Constructor initializes tile properties
         self.visible = config.get('visible', False)  # Tile visibility status
-        self.x = config['x']  # Tile x-coordinate
-        self.y = config['y']  # Tile y-coordinate
+        self.x = config['x'] + x # Tile x-coordinate
+        self.y = config['y'] + y  # Tile y-coordinate
         self.blocked = config.get('blocked', False)  # Tile blockage status
         if config.get('resources', None):  # Checks if resources are present
             self.resources = Resource(config['resources'])  # Assigns resources if available
@@ -105,27 +114,31 @@ class Game:
         for i in range(((2 * game_info["map_height"]) + 1)):
             row = [None] * ((2 * game_info["map_width"]) + 1)
             for j in range(((2 * game_info["map_width"]) + 1)):
-                row[j] = Tile({'x': j, 'y': i})
+                row[j] = None
             self.tiles.append(row)
 
     def get_moves(self, json_data):
         game_info = json_data.get("game_info", {})
         if game_info:
             self.init_board(game_info)
-            
-        for tile in json_data['tile_updates']:
-            self.tiles[tile['x']][tile['y']].update(tile)
-            if tile.get("units", []):
-                for enemy in tile["units"]:
-                    self.enemies[enemy['id']] = Unit(enemy)
 
         for unit in json_data['unit_updates']:
             if self.base is None and unit['type'] == 'base':
-                self.base = Unit(unit)
+                bounds = len(self.tiles[0]), len(self.tiles)
+                self.base = Unit(unit, bounds[0] // 2, bounds[1] // 2)
             if unit['id'] in self.units.keys():
                 self.units[unit['id']].update(unit)
             else:
-                self.units[unit['id']] = Unit(unit)
+                self.units[unit['id']] = Unit(unit, self.base.x, self.base.y)
+            
+        for tile in json_data['tile_updates']:
+            if self.tiles[tile['x']][tile['y']]:
+                self.tiles[tile['x']][tile['y']].update(tile)
+            else:
+                self.tiles[tile['x']][tile['y']] = Tile(tile, self.base.x, self.base.y)
+            if tile.get("units", []):
+                for enemy in tile["units"]:
+                    self.enemies[enemy['id']] = Unit(enemy)
 
         commands = []
         unit_counts = defaultdict(int)
@@ -143,33 +156,34 @@ class Game:
                             commands.append({"command": 'MOVE', "unit": unit.id, "dir": random.choice(self.directions)})
                         else:
                             shortest_path = self.a_star_search((unit.x, unit.y), (destx, desty))
-                            if len(shortest_path > 1):
-                                commands.append({"command": 'MOVE', "unit": unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                            if shortest_path:
+                                x, y = shortest_path[0]
+                                if not self.tiles[x][y]:
+                                    commands.append({"command": 'MOVE', "unit": unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                                else:
+                                    commands.append({"command": 'GATHER', 'unit': unit.id, "dir": self.get_direction(unit, shortest_path[0])})
                             else:
-                                commands.append({"command": 'GATHER', 'unit': unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                                commands.append({"command": 'MOVE', "unit": unit.id, "dir": random.choice(self.directions)})
                 
-        if unit_counts['scout'] <= 3:
-            commands.append({"command": "CREATE", "type": "scout"})
-        if unit_counts['tank'] <= 1:
-            commands.append({"command": "CREATE", "type": "tank"})
-        if unit_counts['worker'] <= 5:
-            commands.append({"command": "CREATE", "type": "worker"})
+        # if unit_counts['scout'] <= 3:
+        #     commands.append({"command": "CREATE", "type": "scout"})
+        # if unit_counts['tank'] <= 1:
+        #     commands.append({"command": "CREATE", "type": "tank"})
+        # if unit_counts['worker'] <= 5:
+        #     commands.append({"command": "CREATE", "type": "worker"})
 
         command = {"commands": commands}
         response = json.dumps(command, separators=(',',':')) + '\n'
         return response
 
     def get_nearest_resource(self, unit):
-            start = unit.x, unit.y
-            for k in range(1, 31):
-                for yoff in range(-k, k+1):
-                    for xoff in range(-k, k+1):
-                        tile = self.tiles[unit.x + xoff][unit.y + yoff]
-                        if tile.resources:
-                            return tile.x, tile.y
+            for r in self.tiles:
+                for c in r:
+                    if c:
+                        if c.resources:
+                            return c.x, c.y
             else:
                 return None, None
-
 
     def get_direction(self, unit, coords):
         if unit.x == coords[0]:
@@ -201,9 +215,11 @@ class Game:
 
     # Check if a cell is unblocked
 
-    def is_unblocked(self,row, col):
+    def is_blocked(self,row, col):
         tile = self.tiles[row][col]
-        return tile.blocked
+        if not tile:
+            return False
+        return tile.blocked and tile.resources is None
 
     # Check if a cell is the destination
 
@@ -239,6 +255,7 @@ class Game:
         # Print the path
         # for i in path:
         #     print("->", i, end=" ")
+        print(path)
         return path
 
 
@@ -248,12 +265,13 @@ class Game:
     def a_star_search(self, src, dest):
         # Check if the source and destination are valid
         bounds = len(self.tiles[0]), len(self.tiles)
+        print(bounds, src, dest)
         if not self.is_valid(src[0], src[1], bounds) or not self.is_valid(dest[0], dest[1], bounds):
             print("Source or destination is invalid")
             return
 
         # Check if the source and destination are unblocked
-        if not self.is_unblocked(src[0], src[1]) or not self.is_unblocked(dest[0], dest[1]):
+        if self.is_blocked(src[0], src[1]) or self.is_blocked(dest[0], dest[1]):
             print("Source or the destination is blocked")
             return
 
@@ -294,14 +312,13 @@ class Game:
             closed_list[i][j] = True
 
             # For each direction, check the successors
-            directions = [(0, 1), (0, -1), (1, 0), (-1, 0),
-                          (1, 1), (1, -1), (-1, 1), (-1, -1)]
+            directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
             for dir in directions:
                 new_i = i + dir[0]
                 new_j = j + dir[1]
 
                 # If the successor is valid, unblocked, and not visited
-                if self.is_valid(new_i, new_j) and self.is_unblocked(new_i, new_j) and not closed_list[new_i][new_j]:
+                if self.is_valid(new_i, new_j, bounds) and not self.is_blocked(new_i, new_j) and not closed_list[new_i][new_j]:
                     # If the successor is the destination
                     if self.is_destination(new_i, new_j, dest):
                         # Set the parent of the destination cell
