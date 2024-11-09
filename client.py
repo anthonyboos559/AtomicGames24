@@ -6,6 +6,7 @@ import random  # Imports random module for random selections
 
 import math
 import heapq
+from collections import defaultdict
 
 class Cell:
     def __init__(self):
@@ -91,34 +92,69 @@ class Resource:  # Class to represent resources on a tile
         self.value = config['value']  # Value of the resource
 
 
-class Game:  # Main class representing the game logic
-    def __init__(self):  # Initializes game properties
-        self.units = set()  # Set to store unique unit IDs
-        self.directions = ['N', 'S', 'E', 'W']  # Possible movement directions
-        self.tiles = []  # List to store game map tiles
+class Game:
+    def __init__(self):
+        self.units = {}
+        self.directions = ['N', 'S', 'E', 'W']
+        self.tiles = []
+        self.enemies = {}
+        self.base = None
 
-    def get_moves(self, json_data):  # Generates moves based on JSON data
-        game_info = json_data.get("game_info", {})  # Extracts game information
-        if game_info:  # If game information is present
-            self.tiles = []  # Resets tiles list
-            for i in range(((2 * game_info["map_height"]) + 1)):  # Creates rows of tiles
-                row = [None] * ((2 * game_info["map_width"]) + 1)  # Initializes row
-                for j in range(((2 * game_info["map_width"]) + 1)):  # Creates columns of tiles
-                    row[j] = Tile({'x': j, 'y': i})  # Creates a tile with x, y coordinates
-                self.tiles.append(row)  # Adds row to tiles list
+    def init_board(self, game_info):
+        self.tiles = []
+        for i in range(((2 * game_info["map_height"]) + 1)):
+            row = [None] * ((2 * game_info["map_width"]) + 1)
+            for j in range(((2 * game_info["map_width"]) + 1)):
+                row[j] = Tile({'x': j, 'y': i})
+            self.tiles.append(row)
 
-        for tile in json_data['tile_updates']:  # Updates each tile with new data
-            self.tiles[tile['x']][tile['y']].update(tile)  # Calls update method for the tile
+    def get_moves(self, json_data):
+        game_info = json_data.get("game_info", {})
+        if game_info:
+            self.init_board(game_info)
+            
+        for tile in json_data['tile_updates']:
+            self.tiles[tile['x']][tile['y']].update(tile)
+            if tile.get("units", []):
+                for enemy in tile["units"]:
+                    self.enemies[enemy['id']] = Unit(enemy)
 
-        units = set([unit['id'] for unit in json_data['unit_updates'] if unit['type'] != 'base'])  # Collects unit IDs
-        self.units |= units  # Adds new unit IDs to the set
-        unit = random.choice(tuple(self.units))  # Chooses a random unit
-        direction = random.choice(self.directions)  # Chooses a random direction
-        move = 'MOVE'  # Sets the command to 'MOVE'
-        command = {
-            "commands": [{"command": move, "unit": unit, "dir": direction}]}  # Creates move command in JSON format
-        response = json.dumps(command, separators=(',', ':')) + '\n'  # Converts command to JSON and adds newline
-        return response  # Returns the move response
+        for unit in json_data['unit_updates']:
+            if self.base is None and unit['type'] == 'base':
+                self.base = Unit(unit)
+            if unit['id'] in self.units.keys():
+                self.units[unit['id']].update(unit)
+            else:
+                self.units[unit['id']] = Unit(unit)
+
+        commands = []
+        unit_counts = defaultdict(int)
+
+        for unit in self.units.values():
+            unit_counts[unit.type] += 1
+            if unit.status == 'idle':
+                if unit.type == 'worker':
+                    if unit.resource:
+                        shortest_path = self.a_star_search((unit.x, unit.y), (self.base.x, self.base.y))
+                        commands.append({"command": 'MOVE', "unit": unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                    else:
+                        destx, desty = self.get_nearest_resource(unit)
+                        shortest_path = self.a_star_search((unit.x, unit.y), (destx, desty))
+                        if len(shortest_path > 1):
+                            commands.append({"command": 'MOVE', "unit": unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                        else:
+                            commands.append({"command": 'GATHER', 'unit': unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                
+        if unit_counts['scout'] <= 3:
+            commands.append({"command": "CREATE", "type": "scout"})
+        if unit_counts['tank'] <= 1:
+            commands.append({"command": "CREATE", "type": "tank"})
+        if unit_counts['worker'] <= 5:
+            commands.append({"command": "CREATE", "type": "worker"})
+
+        command = {"commands": commands}
+        response = json.dumps(command, separators=(',',':')) + '\n'
+        return response
 
     def get_random_move(self, json_data):  # Generates random move commands
         units = set([unit['id'] for unit in json_data['unit_updates'] if unit['type'] != 'base'])  # Collects unit IDs
@@ -131,13 +167,13 @@ class Game:  # Main class representing the game logic
         response = json.dumps(command, separators=(',', ':')) + '\n'  # Converts command to JSON and adds newline
         return response  # Returns the move response
 
-    def is_valid(self, Currentrow, currentcol, game_info):
-        return (Currentrow >= 0) and (Currentrow < game_info["map_height"]) and (currentcol >= 0) and (currentcol < game_info["map_width"])
+    def is_valid(self, Currentrow, currentcol, max):
+        return (Currentrow >= 0) and (Currentrow < max[0]) and (currentcol >= 0) and (currentcol < max[1])
 
     # Check if a cell is unblocked
 
-    def is_unblocked(self,tiles, row, col):
-        tile = tiles[row][col]
+    def is_unblocked(self,row, col):
+        tile = self.tiles[row][col]
         return tile.blocked
 
     # Check if a cell is the destination
@@ -180,14 +216,15 @@ class Game:  # Main class representing the game logic
 
     # Implement the A* search algorithm
 
-    def a_star_search(self,game_info, src, dest, tiles):
+    def a_star_search(self, src, dest):
         # Check if the source and destination are valid
-        if not self.is_valid(src[0], src[1], game_info) or not self.is_valid(dest[0], dest[1], game_info):
+        bounds = len(self.tiles[0]), len(self.tiles)
+        if not self.is_valid(src[0], src[1], bounds) or not self.is_valid(dest[0], dest[1], bounds):
             print("Source or destination is invalid")
             return
 
         # Check if the source and destination are unblocked
-        if not self.is_unblocked(tiles, src[0], src[1]) or not self.is_unblocked(tiles, dest[0], dest[1]):
+        if not self.is_unblocked(src[0], src[1]) or not self.is_unblocked(dest[0], dest[1]):
             print("Source or the destination is blocked")
             return
 
@@ -197,9 +234,9 @@ class Game:  # Main class representing the game logic
             return
 
         # Initialize the closed list (visited cells)
-        closed_list = [[False for _ in range(game_info["map_width"])] for _ in range(game_info["map_height"])]
+        closed_list = [[False for _ in range(bounds[0])] for _ in range(bounds[1])]
         # Initialize the details of each cell
-        cell_details = [[Cell() for _ in range(game_info["map_width"])] for _ in range(game_info["map_height"])]
+        cell_details = [[Cell() for _ in range(bounds[0])] for _ in range(bounds[1])]
 
         # Initialize the start cell details
         i = src[0]
@@ -235,7 +272,7 @@ class Game:  # Main class representing the game logic
                 new_j = j + dir[1]
 
                 # If the successor is valid, unblocked, and not visited
-                if self.is_valid(new_i, new_j) and self.is_unblocked(tiles, new_i, new_j) and not closed_list[new_i][new_j]:
+                if self.is_valid(new_i, new_j) and self.is_unblocked(new_i, new_j) and not closed_list[new_i][new_j]:
                     # If the successor is the destination
                     if self.is_destination(new_i, new_j, dest):
                         # Set the parent of the destination cell
@@ -243,9 +280,9 @@ class Game:  # Main class representing the game logic
                         cell_details[new_i][new_j].parent_j = j
                         print("The destination cell is found")
                         # Trace and print the path from source to destination
-                        self.trace_path(cell_details, dest)
+                        path = self.trace_path(cell_details, dest)
                         found_dest = True
-                        return
+                        return path
                     else:
                         # Calculate the new f, g, and h values
                         g_new = cell_details[i][j].g + 1.0
