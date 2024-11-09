@@ -139,11 +139,14 @@ class Game:
                         commands.append({"command": 'MOVE', "unit": unit.id, "dir": self.get_direction(unit, shortest_path[0])})
                     else:
                         destx, desty = self.get_nearest_resource(unit)
-                        shortest_path = self.a_star_search((unit.x, unit.y), (destx, desty))
-                        if len(shortest_path > 1):
-                            commands.append({"command": 'MOVE', "unit": unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                        if destx is None and desty is None:
+                            commands.append({"command": 'MOVE', "unit": unit.id, "dir": random.choice(self.directions)})
                         else:
-                            commands.append({"command": 'GATHER', 'unit': unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                            shortest_path = self.a_star_search((unit.x, unit.y), (destx, desty))
+                            if len(shortest_path > 1):
+                                commands.append({"command": 'MOVE', "unit": unit.id, "dir": self.get_direction(unit, shortest_path[0])})
+                            else:
+                                commands.append({"command": 'GATHER', 'unit': unit.id, "dir": self.get_direction(unit, shortest_path[0])})
                 
         if unit_counts['scout'] <= 3:
             commands.append({"command": "CREATE", "type": "scout"})
@@ -155,6 +158,32 @@ class Game:
         command = {"commands": commands}
         response = json.dumps(command, separators=(',',':')) + '\n'
         return response
+
+    def get_nearest_resource(self, unit):
+            start = unit.x, unit.y
+            for k in range(1, 31):
+                for yoff in range(-k, k+1):
+                    for xoff in range(-k, k+1):
+                        tile = self.tiles[unit.x + xoff][unit.y + yoff]
+                        if tile.resources:
+                            return tile.x, tile.y
+            else:
+                return None, None
+
+
+    def get_direction(self, unit, coords):
+        if unit.x == coords[0]:
+            dir = unit.y - coords[1]
+            if dir < 0:
+                return 'N'
+            else:
+                return 'S'
+        else:
+            dir = unit.x - coords[0]
+            if dir < 0:
+                return 'W'
+            else:
+                return 'E'
 
     def get_random_move(self, json_data):  # Generates random move commands
         units = set([unit['id'] for unit in json_data['unit_updates'] if unit['type'] != 'base'])  # Collects unit IDs
