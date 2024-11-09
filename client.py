@@ -28,6 +28,7 @@ class NetworkHandler(ss.StreamRequestHandler):
 class Unit:
     def __init__(self, config: dict) -> None:
         self.id = config['id']
+        self.player_id = config['player_id']
         self.x = config['x']
         self.y = config['y']
         self.type = config['type']
@@ -35,6 +36,16 @@ class Unit:
         self.hp = config['health']
         self.resource = config.get("resource", None)
         self.attack = config.get("can_attack", None)
+
+    def update(self, config: dict):
+        self.x = config['x']
+        self.y = config['y']
+        self.type = config['type']
+        self.status = config['status']
+        self.hp = config['health']
+        self.resource = config.get("resource", None)
+        self.attack = config.get("can_attack", None)
+
 
 class Tile:
     def __init__(self, config: dict) -> None:
@@ -72,33 +83,35 @@ class Resource:
 
 class Game:
     def __init__(self):
-        self.units = set() # set of unique unit ids
+        self.units = {}
         self.directions = ['N', 'S', 'E', 'W']
         self.tiles = []
+
+    def init_board(self, game_info):
+        self.tiles = []
+        for i in range(((2 * game_info["map_height"]) + 1)):
+            row = [None] * ((2 * game_info["map_width"]) + 1)
+            for j in range(((2 * game_info["map_width"]) + 1)):
+                row[j] = Tile({'x': j, 'y': i})
+            self.tiles.append(row)
 
     def get_moves(self, json_data):
         game_info = json_data.get("game_info", {})
         if game_info:
-            self.tiles = []
-            for i in range(((2 * game_info["map_height"]) + 1)):
-                row = [None] * ((2 * game_info["map_width"]) + 1)
-                for j in range(((2 * game_info["map_width"]) + 1)):
-                    row[j] = Tile({'x': j, 'y': i})
-                self.tiles.append(row)
+            self.init_board(game_info)
             
         for tile in json_data['tile_updates']:
             self.tiles[tile['x']][tile['y']].update(tile)
-        
-        units = set([unit['id'] for unit in json_data['unit_updates'] if unit['type'] != 'base'])
-        self.units |= units # add any additional ids we encounter
-        unit = random.choice(tuple(self.units))
+
+        for unit in json_data['unit_updates']:
+            self.units[unit['id']] = Unit(unit)
+
+        unit = self.units[random.choice(list(self.units.keys()))]
         direction = random.choice(self.directions)
         move = 'MOVE'
-        command = {"commands": [{"command": move, "unit": unit, "dir": direction}]}
+        command = {"commands": [{"command": move, "unit": unit.id, "dir": direction}]}
         response = json.dumps(command, separators=(',',':')) + '\n'
         return response
-
-
 
     def get_random_move(self, json_data):
         units = set([unit['id'] for unit in json_data['unit_updates'] if unit['type'] != 'base'])
